@@ -27,6 +27,8 @@ Run this command to install automatically:
 curl -sSL https://raw.githubusercontent.com/farooq-001/logforwarder/master/setup_logforwarder.sh | bash
 
 source code: /opt/logforwarder/forwarder.py
+
 config path: /opt/logforwarder/forwarder.conf
+
 service: /etc/systemd/system/logforwarder.service
 
