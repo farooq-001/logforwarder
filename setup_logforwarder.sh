@@ -1,6 +1,6 @@
 #!/bin/bash
 # --------------------------------------------------------------------
-# Dynamic Log Forwarder Installer (with Virtual Environment)
+# Dynamic Log Forwarder Installer (key=value config + virtualenv)
 # --------------------------------------------------------------------
 
 set -e
@@ -10,25 +10,25 @@ VENV_DIR="$INSTALL_DIR/venv"
 SERVICE_FILE="/etc/systemd/system/logforwarder.service"
 PYTHON_BIN="/usr/bin/python3"
 
-echo "[+] Creating installation directories..."
+echo "[+] Creating directories..."
 sudo mkdir -p $INSTALL_DIR
 
 echo "[+] Creating Python virtual environment..."
 sudo $PYTHON_BIN -m venv $VENV_DIR
-
-echo "[+] Activating virtual environment and upgrading pip..."
 sudo $VENV_DIR/bin/pip install --upgrade pip >/dev/null 2>&1
 
 echo "[+] Creating configuration file..."
 sudo tee $INSTALL_DIR/forwarder.conf > /dev/null <<'EOF'
-{
-    "input_host": "0.0.0.0",
-    "input_port": 514,
-    "input_proto": "udp",
-    "output_host": "127.0.0.1",
-    "output_port": 12516,
-    "output_proto": "tcp"
-}
+# Log Forwarder Configuration
+# Input and output can be TCP or UDP
+
+input_host=0.0.0.0
+input_port=514
+input_proto=udp
+
+output_host=127.0.0.1
+output_port=12516
+output_proto=tcp
 EOF
 
 echo "[+] Creating Python forwarder script..."
@@ -36,27 +36,43 @@ sudo tee $INSTALL_DIR/forwarder.py > /dev/null <<'EOF'
 #!/usr/bin/env python3
 import socket
 import sys
-import json
 import os
 from datetime import datetime
 
 CONFIG_FILE = "/opt/logforwarder/forwarder.conf"
 
 def log(msg):
+    """Print timestamped messages to stdout"""
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
 def load_config():
+    """Load configuration from key=value format"""
     if not os.path.exists(CONFIG_FILE):
         log(f"[!] Config file not found: {CONFIG_FILE}")
         sys.exit(1)
+
+    config = {}
     with open(CONFIG_FILE, "r") as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            log("[!] Invalid JSON in config file.")
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key, value = line.split("=", 1)
+                config[key.strip()] = value.strip()
+
+    required = ["input_host", "input_port", "input_proto", "output_host", "output_port", "output_proto"]
+    for key in required:
+        if key not in config:
+            log(f"[!] Missing required config key: {key}")
             sys.exit(1)
 
+    config["input_port"] = int(config["input_port"])
+    config["output_port"] = int(config["output_port"])
+    return config
+
 def create_input_socket(proto, host, port):
+    """Create input socket"""
     if proto.lower() == "udp":
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind((host, port))
@@ -68,11 +84,12 @@ def create_input_socket(proto, host, port):
         sock.listen(5)
         log(f"[+] Listening on TCP {host}:{port}")
     else:
-        log("[!] Unsupported input protocol. Use 'udp' or 'tcp'.")
+        log("[!] Unsupported input protocol (use 'udp' or 'tcp').")
         sys.exit(1)
     return sock
 
 def send_output(proto, host, port, message):
+    """Forward message to output destination"""
     try:
         if proto.lower() == "udp":
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -83,14 +100,14 @@ def send_output(proto, host, port, message):
                 s.sendall((message + "\n").encode())
             log(f"[→] Sent TCP log to {host}:{port}")
     except Exception as e:
-        log(f"[!] Output send error to {host}:{port} — {e}")
+        log(f"[!] Failed to send to {host}:{port} — {e}")
 
 def udp_forwarder(cfg):
     sock = create_input_socket("udp", cfg["input_host"], cfg["input_port"])
     log(f"[=] Forwarding UDP → {cfg['output_proto'].upper()} {cfg['output_host']}:{cfg['output_port']}")
     while True:
         data, addr = sock.recvfrom(65535)
-        log(f"[←] Received UDP packet from {addr[0]}:{addr[1]}")
+        log(f"[←] UDP packet from {addr[0]}:{addr[1]}")
         for line in data.decode(errors="ignore").strip().splitlines():
             if line.strip():
                 send_output(cfg["output_proto"], cfg["output_host"], cfg["output_port"], line.strip())
@@ -100,7 +117,7 @@ def tcp_forwarder(cfg):
     log(f"[=] Forwarding TCP → {cfg['output_proto'].upper()} {cfg['output_host']}:{cfg['output_port']}")
     while True:
         conn, addr = sock.accept()
-        log(f"[+] New TCP connection from {addr[0]}:{addr[1]}")
+        log(f"[+] TCP client connected: {addr[0]}:{addr[1]}")
         with conn:
             while True:
                 data = conn.recv(65535)
@@ -119,7 +136,7 @@ def main():
     elif cfg["input_proto"].lower() == "tcp":
         tcp_forwarder(cfg)
     else:
-        log("[!] Invalid input protocol in config file (use 'udp' or 'tcp').")
+        log("[!] Invalid input protocol in config file.")
 
 if __name__ == "__main__":
     try:
@@ -134,7 +151,7 @@ sudo chmod +x $INSTALL_DIR/forwarder.py
 echo "[+] Creating systemd service..."
 sudo tee $SERVICE_FILE > /dev/null <<EOF
 [Unit]
-Description=Dynamic Log Forwarder (with Python venv)
+Description=Dynamic Log Forwarder (key=value config)
 After=network.target
 
 [Service]
@@ -147,11 +164,16 @@ WorkingDirectory=$INSTALL_DIR
 WantedBy=multi-user.target
 EOF
 
-echo "[+] Reloading systemd daemon..."
+echo "[+] Reloading and starting service..."
 sudo systemctl daemon-reload
 sudo systemctl enable logforwarder
 sudo systemctl restart logforwarder
 
-echo "[✓] Log Forwarder successfully installed and running!"
-echo "[→] View logs: sudo journalctl -u logforwarder -f"
-echo "[→] Edit config: sudo nano $INSTALL_DIR/forwarder.conf"
+echo "[✓] Log Forwarder installed successfully!"
+echo "---------------------------------------------------"
+echo "→ Config file:   $INSTALL_DIR/forwarder.conf"
+echo "→ Script:        $INSTALL_DIR/forwarder.py"
+echo "→ Service name:  logforwarder"
+echo "→ Logs:          sudo journalctl -u logforwarder -f"
+echo "---------------------------------------------------"
+EOF
